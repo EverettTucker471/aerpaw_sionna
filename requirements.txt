@@ -50,3 +50,4 @@ typing_extensions==4.15.0
 uvicorn==0.38.0
 wcwidth==0.2.14
 widgetsnbextension==4.0.15
+pyproj==3.7.2

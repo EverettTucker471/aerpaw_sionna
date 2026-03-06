@@ -1,14 +1,9 @@
-from typing import Dict, Optional, Tuple, Final, Any
-from utils import AntennaType, AntennaArrayType, RadiationPattern, PolarizationType, ORIGIN_LAT_LON
-from utils import CoordinateTransform as CT
-
-# Imports for the default scene object
-import sys
-sys.path.append("..")
+from typing import Dict, Optional, Tuple, Final
+from utils import AntennaType, AntennaArrayType, RadiationPattern, PolarizationType, CoordinateConverter
+import mitsuba as mi
 
 try:
     import sionna.rt
-    import mitsuba as mi
 except ImportError as e:
     import os
 
@@ -19,19 +14,7 @@ except ImportError as e:
 # %matplotlib inline
 import matplotlib.pyplot as plt
 import numpy as np
-
-# Default values for scene parameters
-# SCENE: Final[str] = "../data/scenes/lake-wheeler-scene.xml"
-SCENE: Final[str] = "/app/scenes/lake-wheeler-scene.xml"
-TEMPERATURE: Final[float] = 300.0  # Temperaure in Kelvin
-BANDWIDTH: Final[float] = 30.0  # Bandwidth in MHz
-TX_ARRAY: Final[AntennaArrayType] = AntennaArrayType(AntennaType.Transmitter, 1, 1, 0.0, 0.0, RadiationPattern.ISO, PolarizationType.VERTICAL)
-RX_ARRAY: Final[AntennaArrayType] = AntennaArrayType(AntennaType.Receiver, 1, 1, 0.0, 0.0, RadiationPattern.ISO, PolarizationType.VERTICAL)
-
-# Scattering Coefficient Values
-METAL_SC: Final[float] = 0.1
-CONCRETE_SC: Final[float] = 0.3
-GROUND_SC: Final[float] = 0.5
+import mitsuba as mi
 
 # Import relevant components from Sionna RT
 from sionna.rt import (
@@ -45,38 +28,63 @@ from sionna.rt import (
     subcarrier_frequencies,
 )
 
+# Default values for scene paths
+SCENE: Final[str] = "../data/scenes/lake-wheeler-scene.xml"
+# SCENE: Final[str] = "/app/scenes/lake-wheeler-scene.xml"
+
+# Default values for scene parameters
+TEMPERATURE: Final[float] = 300.0  # Temperaure in Kelvin
+BANDWIDTH: Final[float] = 30.0  # Bandwidth in MHz
+TX_ARRAY: Final[AntennaArrayType] = AntennaArrayType(AntennaType.Transmitter, 1, 1, 0.0, 0.0, RadiationPattern.ISO, PolarizationType.VERTICAL)
+RX_ARRAY: Final[AntennaArrayType] = AntennaArrayType(AntennaType.Receiver, 1, 1, 0.0, 0.0, RadiationPattern.ISO, PolarizationType.VERTICAL)
+
+# Scattering Coefficient Values
+METAL_SC: Final[float] = 0.1
+CONCRETE_SC: Final[float] = 0.3
+GROUND_SC: Final[float] = 0.5
+
 
 class Sionna:
-    """
-    Let each instance of this class represent a separate
-    scene in the backend.
-    These should be created by an API route, and then queried
-    based on some unique scene id by a multithreaded backend
-    """
-    def __init__(self, 
-                 temperature: Optional[float] = TEMPERATURE,
-                 bandwidth: Optional[float] = BANDWIDTH,
-                 tx_array: Optional[AntennaArrayType] = TX_ARRAY,
-                 rx_array: Optional[AntennaArrayType] = RX_ARRAY,
-                 ):
-        # Using hardcoded scene because there's only one Lake Wheeler Environment
-        self.scene = load_scene(SCENE)
-
-        # Setting scattering coefficients
-        self.scene.objects.get("building-roofs").radio_material.scattering_coefficient = METAL_SC
-        self.scene.objects.get("building-roofs-shaped").radio_material.scattering_coefficient = METAL_SC
-        self.scene.objects.get("building-walls").radio_material.scattering_coefficient = CONCRETE_SC
-        self.scene.objects.get("terrain-mesh").radio_material.scattering_coefficient = GROUND_SC
-
-        # These parameters are stored inside the Sionna scene
-        self.scene.temperature = temperature  # For thermal noise power
-        self.scene.bandwidth = bandwidth  # For thermal noise power
-        self.scene.tx_array = tx_array.planar_array
-        self.scene.rx_array = rx_array.planar_array
+    def __init__(self):
+        self.scene = None
         self.transmitters: Dict[str, sionna.rt.Transmitter] = {}
         self.receivers: Dict[str, sionna.rt.Receiver] = {}
         self._path_solver = sionna.rt.PathSolver()
         self._computed_paths = None
+        self._coordinate_converter = None
+
+
+    def initialize(self, 
+                   env: mi.ThreadEnvironment,
+                   scene_path: Optional[str] = None,
+                   scene_origin: Optional[Dict[str, float]] = None,
+                   temperature: Optional[float] = TEMPERATURE,
+                   bandwidth: Optional[float] = BANDWIDTH,
+                   tx_array: Optional[AntennaArrayType] = TX_ARRAY,
+                   rx_array: Optional[AntennaArrayType] = RX_ARRAY,
+                   ) -> None:
+        try:
+            # Brings mitsuba's plugins in scope to load the scene
+            with mi.ScopedSetThreadEnvironment(env):
+                self.scene = load_scene(scene_path or SCENE)
+
+            # Setting scattering coefficients
+            self.scene.objects.get("building-roofs").radio_material.scattering_coefficient = METAL_SC
+            self.scene.objects.get("building-roofs-shaped").radio_material.scattering_coefficient = METAL_SC
+            self.scene.objects.get("building-walls").radio_material.scattering_coefficient = CONCRETE_SC
+            self.scene.objects.get("terrain-mesh").radio_material.scattering_coefficient = GROUND_SC
+
+            # Setting Scene Parameters
+            self.scene.temperature = temperature or TEMPERATURE  # For thermal noise power
+            self.scene.bandwidth = bandwidth or BANDWIDTH  # For thermal noise power
+            self.scene.tx_array = tx_array.planar_array if tx_array else TX_ARRAY.planar_array
+            self.scene.rx_array = rx_array.planar_array if rx_array else RX_ARRAY.planar_array
+            self._coordinate_converter = CoordinateConverter(scene_origin)
+
+            print(f"Successfully loaded scene: {scene_path or SCENE}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load scene: {e}")
+
 
     def get_scene_info(self):
         if not self.scene:
@@ -102,16 +110,14 @@ class Sionna:
             "temperature": self.scene.temperature[0],
         }
     
-    def get_reference_frame(self):
-        """Gets information about the scene reference frame"""
-        return {
-            "origin_lat": ORIGIN_LAT_LON[0],
-            "origin_lon": ORIGIN_LAT_LON[1],
-            "origin_alt": ORIGIN_LAT_LON[2],
-            "x_direction": "positive_lat",
-            "y_direction": "negative_lon",
-            "z_direction": "positive_alt",
-        }
+
+    def update_origin(self, new_origin: Dict[str, float]) -> Dict[str, float]:
+        if not self.scene:
+            raise RuntimeError("Scene not loaded")
+        
+        self._coordinate_converter.update_reference_origin(new_origin)
+        return self._coordinate_converter.get_origin()
+
 
     def add_transmitter(
         self,
@@ -124,7 +130,9 @@ class Sionna:
         if not self.scene:
             raise RuntimeError("Scene not loaded")
         
-        position = CT.to_sionna(pos=position)
+        position = self._coordinate_converter.lat_lon_alt_to_local(position[0],
+                                                                   position[1],
+                                                                   position[2])
         tx = sionna.rt.Transmitter(name=name, position=mi.Point3f(list(position)), 
                                    power_dbm=signal_power, velocity=mi.Vector3f(list(velocity)))
 
@@ -148,12 +156,14 @@ class Sionna:
         position: Tuple[float, float, float],
         velocity: Tuple[float, float, float],
         orientation: Optional[Tuple[float, float, float]] = None,
-    ) -> None:
+    ) -> Tuple[float, float, float]:
         """Add a receiver to the scene."""
         if not self.scene:
             raise RuntimeError("Scene not loaded")
 
-        position = CT.to_sionna(pos=position)
+        position = self._coordinate_converter.lat_lon_alt_to_local(position[0],
+                                                                   position[1],
+                                                                   position[2])
         rx = sionna.rt.Receiver(name=name, position=mi.Point3f(list(position)),
                                 velocity=mi.Point3f(list(velocity)))
         
@@ -197,9 +207,9 @@ class Sionna:
             self.scene.tx_array = antenna_array
         elif ant_type == AntennaType.Receiver:
             self.scene.rx_array = antenna_array
-    
 
-    def update_tx(self, name: str, 
+
+    def update_transmitter(self, name: str, 
                   position: Tuple[float, float, float],
                   signal_power: float,
                   velocity: Tuple[float, float, float],
@@ -209,9 +219,11 @@ class Sionna:
         if name not in self.transmitters:
             raise ValueError(f"Transmitter '{name}' doesn't exist in this scene")
 
-        position = CT.to_sionna(pos=position)
         device = self.transmitters[name]
         if position:
+            position = self._coordinate_converter.lat_lon_alt_to_local(position[0],
+                                                                       position[1],
+                                                                       position[2])
             device.position = mi.Point3f(list(position)) 
         if signal_power:
             device.power_dbm = signal_power
@@ -221,7 +233,7 @@ class Sionna:
             device.orientation = mi.Point3f(list(orientation))
 
 
-    def update_rx(self, name: str,
+    def update_receiver(self, name: str,
                   position: Tuple[float, float, float],
                   velocity: Tuple[float, float, float],
                   orientation: Tuple[float, float, float]
@@ -230,17 +242,19 @@ class Sionna:
         if name not in self.receivers:
             raise ValueError(f"Receiver '{name}' doesn't exist in this scene")
     
-        position = CT.to_sionna(pos=position)
         device = self.receivers[name]
         if position:
+            position = self._coordinate_converter.lat_lon_alt_to_local(position[0],
+                                                                       position[1],
+                                                                       position[2])
             device.position = mi.Point3f(list(position))
         if velocity:
             device.velocity = mi.Vector3f(list(velocity))
         if orientation:
             device.orientation = mi.Point3f(list(orientation))
-    
 
-    def compute_paths(self, max_depth: int = 3, num_samples: int = 10e5) -> Dict[str, int]:
+
+    def compute_paths(self, max_depth: int = 3, num_samples: int = 1e5) -> Dict:
         """Compute propagation paths between transmitters and receivers."""
         if not self.scene:
             raise RuntimeError("Scene not loaded")
@@ -248,8 +262,6 @@ class Sionna:
         if not self.transmitters or not self.receivers:
             raise RuntimeError("No transmitters or receivers in scene")
 
-        # Compute paths
-        print(num_samples)
         self._computed_paths = self._path_solver(scene=self.scene, max_depth=max_depth, 
                                                  max_num_paths_per_src=num_samples, samples_per_src=num_samples,
                                                  los=True, specular_reflection=True, diffuse_reflection=True,
@@ -266,10 +278,11 @@ class Sionna:
         return {
             "path_count": path_count,
             "max_depth": max_depth,
+            "num_samples": num_samples,
         }
+    
 
-
-    def get_channel_impulse_response(self) -> Dict[str, Any]:
+    def get_channel_impulse_response(self) -> Dict:
         """Return Channel Impulse Response (CIR) from computed paths."""
 
         try:
@@ -319,22 +332,4 @@ class Sionna:
         self.receivers.clear()
         self._path_solver = sionna.rt.PathSolver()
         self._computed_paths = None
-
-
-class SionnaFactory():
-    """
-    Factory class for producing multiple Sionna
-    engine instance
-    """
-
-    @classmethod
-    def init_engine(cls, 
-                    temperature: Optional[float] = TEMPERATURE,
-                    bandwidth: Optional[float] = BANDWIDTH,
-                    tx_array: Optional[AntennaArrayType] = TX_ARRAY,
-                    rx_array: Optional[AntennaArrayType] = RX_ARRAY,
-                    ):
-        return Sionna(temperature=temperature, 
-                      bandwidth=bandwidth, 
-                      tx_array=tx_array, 
-                      rx_array=rx_array)
+        self._coordinate_converter = None

@@ -5,7 +5,20 @@ from pydantic import BaseModel, Field
 from utils import AntennaArrayType, AntennaType, RadiationPattern, PolarizationType
 
 
-class Position(BaseModel):
+class GeoPosition(BaseModel):
+    lat: float = Field(..., ge=-90.0, le=90.0, description="Latitude in degrees")
+    lon: float = Field(..., ge=-180.0, le=180.0, description="Longitude in degrees")
+    alt: float = Field(..., description="Altitude in meters")
+
+    def to_tuple(self):
+        return (self.lat, self.lon, self.alt)
+
+    @classmethod
+    def from_tuple(cls, pos: tuple):
+        return cls(lat=pos[0], lon=pos[1], alt=pos[2])
+
+
+class Orientation(BaseModel):
     x: float
     y: float
     z: float
@@ -65,48 +78,19 @@ class TransmitterCreate(BaseModel):
     Creates a new transmitter in the scene
     """
     name: str = Field(..., description="Unique identifier for the device")
-    position: Position
-    signal_power: float
-    velocity: Optional[Position] = Position(x=0, y=0, z=0)  # Used for doppler effects
-    orientation: Optional[Position] = None
+    position: GeoPosition
+    orientation: Optional[Orientation] = None
 
 
-class TransmitterUpdate(BaseModel):
-    """
-    Updates all the parameters of a transmitter object by name
-    """
-    position: Optional[Position] = None
-    signal_power: Optional[float] = None
-    velocity: Optional[Position] = None
-    orientation: Optional[Position] = None
-
-
-class ReceiverCreate(BaseModel):
-    """
-    Creates a new receiver in the scene
-    """
-    name: str = Field(..., description="Unique identifier for the device")
-    position: Position
-    velocity: Optional[Position] = Position(x=0, y=0, z=0)  # Used for doppler effects
-    orientation: Optional[Position] = None
-
-
-class ReceiverUpdate(BaseModel):
-    """
-    Update all the parameters of a receiver in the scene
-    """
-    position: Optional[Position] = None
-    velocity: Optional[Position] = None
-    orientation: Optional[Position] = None
+class DeviceUpdate(BaseModel):
+    position: GeoPosition
+    orientation: Optional[Orientation] = None
 
 
 class DeviceResponse(BaseModel):
     name: str
-    type: str
-    position: Position
-    velocity: Optional[Position] = Position(x=0, y=0, z=0)  # Used for doppler effects
-    signal_power: Optional[float] = None
-    orientation: Optional[Position] = None
+    position: GeoPosition
+    orientation: Optional[Orientation] = None
 
 
 class PathComputationRequest(BaseModel):
@@ -161,23 +145,20 @@ class SceneInfoResponse(BaseModel):
     objects: List[str]
     transmitter_count: int
     receiver_count: int
-    tx_array: AntennaArrayResponse
-    rx_array: AntennaArrayResponse
-    temperature: float = Field(description="Temperature of the scene environment in Kelvin")
+    coordinate_reference: GeoPosition = Field(
+        description="Lat/lon/alt origin used for local Sionna coordinate conversion"
+    )
 
 
-class ScenesResponse(BaseModel):
-   scene_count: int
-   scenes: List[SceneInfoResponse]
+class SceneCreateRequest(BaseModel):
+    scene_path: Optional[str] = Field(
+        None, description="Optional custom scene path. Defaults to bundled Sionna scene."
+    )
 
 
-class ReferenceFrameResponse(BaseModel):
-    origin_lat: float
-    origin_lon: float
-    origin_alt: float
-    x_direction: str
-    y_direction: str
-    z_direction: str
+class SceneCreateResponse(BaseModel):
+    scene_id: str
+    message: str = "Scene created successfully"
 
 
 class MessageResponse(BaseModel):
